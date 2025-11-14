@@ -64,8 +64,27 @@ RUN if [ "$ENABLE_PYTORCH_UPGRADE" = "true" ]; then \
 # Change working directory to ComfyUI
 WORKDIR /comfyui
 
-# Support for the network volume
-ADD src/extra_model_paths.yaml ./
+# --- SYMLINK IMPLEMENTATION START ---
+
+# Clean out the empty model directories that ComfyUI installs (e.g., /comfyui/models/loras)
+RUN rm -rf /comfyui/models/loras /comfyui/models/vae /comfyui/models/diffusion_models /comfyui/models/text_encoders
+
+# Create symbolic links to the Network Volume mount point (/runpod-volume)
+# This fools ComfyUI into thinking the models are local.
+
+# LoRAs
+RUN ln -s /runpod-volume/loras /comfyui/models/loras
+
+# VAEs
+RUN ln -s /runpod-volume/vae /comfyui/models/vae
+
+# UNETs / Diffusion Models
+RUN ln -s /runpod-volume/diffusion_models /comfyui/models/diffusion_models
+
+# CLIP / Text Encoders
+RUN ln -s /runpod-volume/text_encoders /comfyui/models/text_encoders
+
+# --- SYMLINK IMPLEMENTATION END ---
 
 # Go back to the root
 WORKDIR /
