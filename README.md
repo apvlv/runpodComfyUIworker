@@ -1,5 +1,7 @@
 # worker-comfyui
 
+Runpod v2
+
 > [ComfyUI](https://github.com/comfyanonymous/ComfyUI) as a serverless API on [RunPod](https://www.runpod.io/)
 
 <p align="center">
