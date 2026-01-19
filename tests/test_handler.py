@@ -1,24 +1,29 @@
 import unittest
-from unittest.mock import patch, MagicMock, mock_open, Mock
+from unittest.mock import patch, MagicMock, Mock
 import sys
 import os
 import json
 import base64
 
-# Make sure that "src" is known and can be used to import handler.py
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
-from src import handler
+# Make sure that the root is in path so we can import handler.py
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import handler
 
 # Local folder for test resources
 RUNPOD_WORKER_COMFY_TEST_RESOURCES_IMAGES = "./test_resources/images"
 
 
-class TestRunpodWorkerComfy(unittest.TestCase):
+class TestValidateInput(unittest.TestCase):
+    """Tests for the validate_input function."""
+
     def test_valid_input_with_workflow_only(self):
         input_data = {"workflow": {"key": "value"}}
         validated_data, error = handler.validate_input(input_data)
         self.assertIsNone(error)
-        self.assertEqual(validated_data, {"workflow": {"key": "value"}, "images": None})
+        self.assertEqual(
+            validated_data,
+            {"workflow": {"key": "value"}, "images": None, "comfy_org_api_key": None},
+        )
 
     def test_valid_input_with_workflow_and_images(self):
         input_data = {
@@ -27,7 +32,26 @@ class TestRunpodWorkerComfy(unittest.TestCase):
         }
         validated_data, error = handler.validate_input(input_data)
         self.assertIsNone(error)
-        self.assertEqual(validated_data, input_data)
+        expected = {
+            "workflow": {"key": "value"},
+            "images": [{"name": "image1.png", "image": "base64string"}],
+            "comfy_org_api_key": None,
+        }
+        self.assertEqual(validated_data, expected)
+
+    def test_valid_input_with_comfy_org_api_key(self):
+        input_data = {
+            "workflow": {"key": "value"},
+            "comfy_org_api_key": "test-api-key-123",
+        }
+        validated_data, error = handler.validate_input(input_data)
+        self.assertIsNone(error)
+        expected = {
+            "workflow": {"key": "value"},
+            "images": None,
+            "comfy_org_api_key": "test-api-key-123",
+        }
+        self.assertEqual(validated_data, expected)
 
     def test_input_missing_workflow(self):
         input_data = {"images": [{"name": "image1.png", "image": "base64string"}]}
@@ -56,13 +80,20 @@ class TestRunpodWorkerComfy(unittest.TestCase):
         input_data = '{"workflow": {"key": "value"}}'
         validated_data, error = handler.validate_input(input_data)
         self.assertIsNone(error)
-        self.assertEqual(validated_data, {"workflow": {"key": "value"}, "images": None})
+        self.assertEqual(
+            validated_data,
+            {"workflow": {"key": "value"}, "images": None, "comfy_org_api_key": None},
+        )
 
     def test_empty_input(self):
         input_data = None
         validated_data, error = handler.validate_input(input_data)
         self.assertIsNotNone(error)
         self.assertEqual(error, "Please provide input")
+
+
+class TestCheckServer(unittest.TestCase):
+    """Tests for the check_server function."""
 
     @patch("handler.requests.get")
     def test_check_server_server_up(self, mock_requests):
@@ -75,164 +106,342 @@ class TestRunpodWorkerComfy(unittest.TestCase):
 
     @patch("handler.requests.get")
     def test_check_server_server_down(self, mock_requests):
-        mock_requests.get.side_effect = handler.requests.RequestException()
+        mock_requests.side_effect = handler.requests.RequestException()
         result = handler.check_server("http://127.0.0.1:8188", 1, 50)
         self.assertFalse(result)
 
-    @patch("handler.urllib.request.urlopen")
-    def test_queue_prompt(self, mock_urlopen):
+    @patch("handler.requests.get")
+    def test_check_server_timeout(self, mock_requests):
+        mock_requests.side_effect = handler.requests.Timeout()
+        result = handler.check_server("http://127.0.0.1:8188", 1, 50)
+        self.assertFalse(result)
+
+
+class TestQueueWorkflow(unittest.TestCase):
+    """Tests for the queue_workflow function."""
+
+    @patch("handler.requests.post")
+    def test_queue_workflow_success(self, mock_post):
         mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({"prompt_id": "123"}).encode()
-        mock_urlopen.return_value = mock_response
-        result = handler.queue_workflow({"prompt": "test"})
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"prompt_id": "123"}
+        mock_post.return_value = mock_response
+
+        result = handler.queue_workflow({"prompt": "test"}, "client-id-123")
         self.assertEqual(result, {"prompt_id": "123"})
 
-    @patch("handler.urllib.request.urlopen")
-    def test_get_history(self, mock_urlopen):
-        # Mock response data as a JSON string
-        mock_response_data = json.dumps({"key": "value"}).encode("utf-8")
+    @patch("handler.requests.post")
+    @patch("handler.get_available_models")
+    def test_queue_workflow_validation_error(self, mock_get_models, mock_post):
+        mock_get_models.return_value = {"checkpoints": ["model1.safetensors"]}
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.text = '{"error": "validation failed"}'
+        mock_response.json.return_value = {"error": "validation failed"}
+        mock_post.return_value = mock_response
 
-        # Define a mock response function for `read`
-        def mock_read():
-            return mock_response_data
+        with self.assertRaises(ValueError):
+            handler.queue_workflow({"prompt": "test"}, "client-id-123")
 
-        # Create a mock response object
-        mock_response = Mock()
-        mock_response.read = mock_read
+    @patch("handler.requests.post")
+    def test_queue_workflow_with_api_key(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"prompt_id": "123"}
+        mock_post.return_value = mock_response
 
-        # Mock the __enter__ and __exit__ methods to support the context manager
-        mock_response.__enter__ = lambda s: s
-        mock_response.__exit__ = Mock()
-
-        # Set the return value of the urlopen mock
-        mock_urlopen.return_value = mock_response
-
-        # Call the function under test
-        result = handler.get_history("123")
-
-        # Assertions
-        self.assertEqual(result, {"key": "value"})
-        mock_urlopen.assert_called_with("http://127.0.0.1:8188/history/123")
-
-    @patch("builtins.open", new_callable=mock_open, read_data=b"test")
-    def test_base64_encode(self, mock_file):
-        test_data = base64.b64encode(b"test").decode("utf-8")
-
-        result = handler.base64_encode("dummy_path")
-
-        self.assertEqual(result, test_data)
-
-    @patch("handler.os.path.exists")
-    @patch("handler.rp_upload.upload_image")
-    @patch.dict(
-        os.environ, {"COMFY_OUTPUT_PATH": RUNPOD_WORKER_COMFY_TEST_RESOURCES_IMAGES}
-    )
-    def test_bucket_endpoint_not_configured(self, mock_upload_image, mock_exists):
-        mock_exists.return_value = True
-        mock_upload_image.return_value = "simulated_uploaded/image.png"
-
-        outputs = {
-            "node_id": {"images": [{"filename": "ComfyUI_00001_.png", "subfolder": ""}]}
-        }
-        job_id = "123"
-
-        result = handler.process_output_images(outputs, job_id)
-
-        self.assertEqual(result["status"], "success")
-
-    @patch("handler.os.path.exists")
-    @patch("handler.rp_upload.upload_image")
-    @patch.dict(
-        os.environ,
-        {
-            "COMFY_OUTPUT_PATH": RUNPOD_WORKER_COMFY_TEST_RESOURCES_IMAGES,
-            "BUCKET_ENDPOINT_URL": "http://example.com",
-        },
-    )
-    def test_bucket_endpoint_configured(self, mock_upload_image, mock_exists):
-        # Mock the os.path.exists to return True, simulating that the image exists
-        mock_exists.return_value = True
-
-        # Mock the rp_upload.upload_image to return a simulated URL
-        mock_upload_image.return_value = "http://example.com/uploaded/image.png"
-
-        # Define the outputs and job_id for the test
-        outputs = {
-            "node_id": {
-                "images": [{"filename": "ComfyUI_00001_.png", "subfolder": "test"}]
-            }
-        }
-        job_id = "123"
-
-        # Call the function under test
-        result = handler.process_output_images(outputs, job_id)
-
-        # Assertions
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result["message"], "http://example.com/uploaded/image.png")
-        mock_upload_image.assert_called_once_with(
-            job_id, "./test_resources/images/test/ComfyUI_00001_.png"
+        result = handler.queue_workflow(
+            {"prompt": "test"}, "client-id-123", comfy_org_api_key="test-key"
         )
 
-    @patch("handler.os.path.exists")
-    @patch("handler.rp_upload.upload_image")
-    @patch.dict(
-        os.environ,
-        {
-            "COMFY_OUTPUT_PATH": RUNPOD_WORKER_COMFY_TEST_RESOURCES_IMAGES,
-            "BUCKET_ENDPOINT_URL": "http://example.com",
-            "BUCKET_ACCESS_KEY_ID": "",
-            "BUCKET_SECRET_ACCESS_KEY": "",
-        },
-    )
-    def test_bucket_image_upload_fails_env_vars_wrong_or_missing(
-        self, mock_upload_image, mock_exists
-    ):
-        # Simulate the file existing in the output path
-        mock_exists.return_value = True
+        # Verify the API key was included in the payload
+        call_args = mock_post.call_args
+        payload = json.loads(call_args.kwargs["data"])
+        self.assertEqual(payload["extra_data"]["api_key_comfy_org"], "test-key")
+        self.assertEqual(result, {"prompt_id": "123"})
 
-        # When AWS credentials are wrong or missing, upload_image should return 'simulated_uploaded/...'
-        mock_upload_image.return_value = "simulated_uploaded/image.png"
 
-        outputs = {
-            "node_id": {"images": [{"filename": "ComfyUI_00001_.png", "subfolder": ""}]}
-        }
-        job_id = "123"
+class TestGetHistory(unittest.TestCase):
+    """Tests for the get_history function."""
 
-        result = handler.process_output_images(outputs, job_id)
+    @patch("handler.requests.get")
+    def test_get_history_success(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"key": "value"}
+        mock_get.return_value = mock_response
 
-        # Check if the image was saved to the 'simulated_uploaded' directory
-        self.assertIn("simulated_uploaded", result["message"])
-        self.assertEqual(result["status"], "success")
+        result = handler.get_history("123")
+
+        self.assertEqual(result, {"key": "value"})
+        mock_get.assert_called_with(
+            "http://127.0.0.1:8188/history/123", timeout=30
+        )
+
+
+class TestGetImageData(unittest.TestCase):
+    """Tests for the get_image_data function."""
+
+    @patch("handler.requests.get")
+    def test_get_image_data_success(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.content = b"image_bytes"
+        mock_get.return_value = mock_response
+
+        result = handler.get_image_data("test.png", "subfolder", "output")
+
+        self.assertEqual(result, b"image_bytes")
+
+    @patch("handler.requests.get")
+    def test_get_image_data_timeout(self, mock_get):
+        mock_get.side_effect = handler.requests.Timeout()
+
+        result = handler.get_image_data("test.png", "subfolder", "output")
+
+        self.assertIsNone(result)
+
+    @patch("handler.requests.get")
+    def test_get_image_data_request_error(self, mock_get):
+        mock_get.side_effect = handler.requests.RequestException("error")
+
+        result = handler.get_image_data("test.png", "subfolder", "output")
+
+        self.assertIsNone(result)
+
+
+class TestUploadImages(unittest.TestCase):
+    """Tests for the upload_images function."""
 
     @patch("handler.requests.post")
     def test_upload_images_successful(self, mock_post):
-        mock_response = unittest.mock.Mock()
+        mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.text = "Successfully uploaded"
+        mock_response.raise_for_status = MagicMock()
         mock_post.return_value = mock_response
 
         test_image_data = base64.b64encode(b"Test Image Data").decode("utf-8")
-
         images = [{"name": "test_image.png", "image": test_image_data}]
 
-        responses = handler.upload_images(images)
+        result = handler.upload_images(images)
 
-        self.assertEqual(len(responses), 3)
-        self.assertEqual(responses["status"], "success")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["message"], "All images uploaded successfully")
+
+    @patch("handler.requests.post")
+    def test_upload_images_with_data_uri_prefix(self, mock_post):
+        """Test that data URI prefix is properly stripped."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_post.return_value = mock_response
+
+        test_image_data = base64.b64encode(b"Test Image Data").decode("utf-8")
+        images = [
+            {"name": "test_image.png", "image": f"data:image/png;base64,{test_image_data}"}
+        ]
+
+        result = handler.upload_images(images)
+
+        self.assertEqual(result["status"], "success")
 
     @patch("handler.requests.post")
     def test_upload_images_failed(self, mock_post):
-        mock_response = unittest.mock.Mock()
+        mock_response = MagicMock()
         mock_response.status_code = 400
-        mock_response.text = "Error uploading"
+        mock_response.raise_for_status.side_effect = handler.requests.HTTPError("Error")
         mock_post.return_value = mock_response
 
         test_image_data = base64.b64encode(b"Test Image Data").decode("utf-8")
-
         images = [{"name": "test_image.png", "image": test_image_data}]
 
-        responses = handler.upload_images(images)
+        result = handler.upload_images(images)
 
-        self.assertEqual(len(responses), 3)
-        self.assertEqual(responses["status"], "error")
+        self.assertEqual(result["status"], "error")
+
+    def test_upload_images_empty_list(self):
+        result = handler.upload_images([])
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["message"], "No images to upload")
+
+    def test_upload_images_none(self):
+        result = handler.upload_images(None)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["message"], "No images to upload")
+
+    @patch("handler.requests.post")
+    def test_upload_images_invalid_base64(self, mock_post):
+        """Test handling of invalid base64 data."""
+        images = [{"name": "test_image.png", "image": "not-valid-base64!@#$"}]
+
+        result = handler.upload_images(images)
+
+        self.assertEqual(result["status"], "error")
+
+
+class TestGetAvailableModels(unittest.TestCase):
+    """Tests for the get_available_models function."""
+
+    @patch("handler.requests.get")
+    def test_get_available_models_success(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "CheckpointLoaderSimple": {
+                "input": {
+                    "required": {
+                        "ckpt_name": [["model1.safetensors", "model2.safetensors"]]
+                    }
+                }
+            }
+        }
+        mock_get.return_value = mock_response
+
+        result = handler.get_available_models()
+
+        self.assertEqual(
+            result["checkpoints"], ["model1.safetensors", "model2.safetensors"]
+        )
+
+    @patch("handler.requests.get")
+    def test_get_available_models_error(self, mock_get):
+        mock_get.side_effect = Exception("Network error")
+
+        result = handler.get_available_models()
+
+        self.assertEqual(result, {})
+
+
+class TestComfyServerStatus(unittest.TestCase):
+    """Tests for the _comfy_server_status function."""
+
+    @patch("handler.requests.get")
+    def test_comfy_server_status_reachable(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_get.return_value = mock_response
+
+        result = handler._comfy_server_status()
+
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["status_code"], 200)
+
+    @patch("handler.requests.get")
+    def test_comfy_server_status_unreachable(self, mock_get):
+        mock_get.side_effect = Exception("Connection refused")
+
+        result = handler._comfy_server_status()
+
+        self.assertFalse(result["reachable"])
+        self.assertIn("error", result)
+
+
+class TestAttemptWebsocketReconnect(unittest.TestCase):
+    """Tests for the _attempt_websocket_reconnect function."""
+
+    @patch("handler._comfy_server_status")
+    @patch("handler.websocket.WebSocket")
+    def test_reconnect_success(self, mock_ws_class, mock_server_status):
+        mock_server_status.return_value = {"reachable": True, "status_code": 200}
+        mock_ws_instance = MagicMock()
+        mock_ws_class.return_value = mock_ws_instance
+
+        result = handler._attempt_websocket_reconnect(
+            "ws://127.0.0.1:8188/ws?clientId=test", 3, 0, Exception("initial")
+        )
+
+        self.assertEqual(result, mock_ws_instance)
+        mock_ws_instance.connect.assert_called_once()
+
+    @patch("handler._comfy_server_status")
+    @patch("handler.websocket.WebSocket")
+    def test_reconnect_server_unreachable(self, mock_ws_class, mock_server_status):
+        mock_server_status.return_value = {"reachable": False, "error": "connection refused"}
+
+        with self.assertRaises(handler.websocket.WebSocketConnectionClosedException):
+            handler._attempt_websocket_reconnect(
+                "ws://127.0.0.1:8188/ws?clientId=test", 3, 0, Exception("initial")
+            )
+
+    @patch("handler._comfy_server_status")
+    @patch("handler.websocket.WebSocket")
+    @patch("handler.time.sleep")
+    def test_reconnect_retry_then_success(self, mock_sleep, mock_ws_class, mock_server_status):
+        mock_server_status.return_value = {"reachable": True, "status_code": 200}
+        mock_ws_instance = MagicMock()
+        mock_ws_class.return_value = mock_ws_instance
+        # First attempt fails, second succeeds
+        mock_ws_instance.connect.side_effect = [
+            handler.websocket.WebSocketException("fail"),
+            None,
+        ]
+
+        result = handler._attempt_websocket_reconnect(
+            "ws://127.0.0.1:8188/ws?clientId=test", 3, 1, Exception("initial")
+        )
+
+        self.assertEqual(result, mock_ws_instance)
+        self.assertEqual(mock_ws_instance.connect.call_count, 2)
+        mock_sleep.assert_called_once_with(1)
+
+    @patch("handler._comfy_server_status")
+    @patch("handler.websocket.WebSocket")
+    @patch("handler.time.sleep")
+    def test_reconnect_all_attempts_fail(self, mock_sleep, mock_ws_class, mock_server_status):
+        mock_server_status.return_value = {"reachable": True, "status_code": 200}
+        mock_ws_instance = MagicMock()
+        mock_ws_class.return_value = mock_ws_instance
+        mock_ws_instance.connect.side_effect = handler.websocket.WebSocketException("fail")
+
+        with self.assertRaises(handler.websocket.WebSocketConnectionClosedException):
+            handler._attempt_websocket_reconnect(
+                "ws://127.0.0.1:8188/ws?clientId=test", 3, 0, Exception("initial")
+            )
+
+        self.assertEqual(mock_ws_instance.connect.call_count, 3)
+
+
+class TestHandlerFunction(unittest.TestCase):
+    """Tests for the main handler function."""
+
+    @patch("handler.check_server")
+    @patch("handler.validate_input")
+    def test_handler_invalid_input(self, mock_validate, mock_check_server):
+        mock_validate.return_value = (None, "Missing 'workflow' parameter")
+
+        job = {"id": "test-job-123", "input": {}}
+        result = handler.handler(job)
+
+        self.assertEqual(result, {"error": "Missing 'workflow' parameter"})
+
+    @patch("handler.check_server")
+    @patch("handler.validate_input")
+    def test_handler_server_unavailable(self, mock_validate, mock_check_server):
+        mock_validate.return_value = ({"workflow": {}, "images": None, "comfy_org_api_key": None}, None)
+        mock_check_server.return_value = False
+
+        job = {"id": "test-job-123", "input": {"workflow": {}}}
+        result = handler.handler(job)
+
+        self.assertIn("error", result)
+        self.assertIn("not reachable", result["error"])
+
+    @patch("handler.check_server")
+    @patch("handler.validate_input")
+    @patch("handler.upload_images")
+    def test_handler_upload_images_failure(self, mock_upload, mock_validate, mock_check_server):
+        mock_validate.return_value = (
+            {"workflow": {}, "images": [{"name": "test.png", "image": "data"}], "comfy_org_api_key": None},
+            None,
+        )
+        mock_check_server.return_value = True
+        mock_upload.return_value = {"status": "error", "details": ["upload failed"]}
+
+        job = {"id": "test-job-123", "input": {"workflow": {}, "images": [{"name": "test.png", "image": "data"}]}}
+        result = handler.handler(job)
+
+        self.assertIn("error", result)
+        self.assertEqual(result["error"], "Failed to upload one or more input images")
+
+
+if __name__ == "__main__":
+    unittest.main()

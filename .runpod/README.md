@@ -180,9 +180,17 @@ This example uses a simplified workflow (replace with your actual workflow JSON)
   "executionTime": 2297,
   "id": "sync-c0cd1eb2-068f-4ecf-a99a-55770fc77391-e1",
   "output": {
-    "message": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABAAAAAQACAIAAADwf7zU...",
-    "status": "success"
+    "images": [
+      {
+        "filename": "ComfyUI_00001_.png",
+        "type": "base64",
+        "data": "iVBORw0KGgoAAAANSUhEUgAABAAAAAQACAIAAADwf7zU..."
+      }
+    ]
   },
   "status": "COMPLETED"
 }
 ```
+
+> [!NOTE]
+> The output format changed in version 5.0.0. Images are now returned as an array of objects with `filename`, `type`, and `data` fields. When S3 upload is configured, the `type` will be `"s3_url"` instead of `"base64"`.

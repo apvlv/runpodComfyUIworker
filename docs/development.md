@@ -84,12 +84,39 @@ Unit tests are provided to verify the core logic of the `handler.py`.
 - **Run a specific test case or method**:
 
   ```bash
-  # Example: Run all tests in the TestRunpodWorkerComfy class
-  python -m unittest tests.test_handler.TestRunpodWorkerComfy
+  # Example: Run all tests in the TestValidateInput class
+  python -m unittest tests.test_handler.TestValidateInput
 
   # Example: Run a single test method
-  python -m unittest tests.test_handler.TestRunpodWorkerComfy.test_s3_upload
+  python -m unittest tests.test_handler.TestUploadImages.test_upload_images_successful
   ```
+
+### Available Test Classes
+
+The test suite covers the following areas:
+
+- `TestValidateInput` - Input validation and parsing
+- `TestCheckServer` - Server connectivity checks
+- `TestQueueWorkflow` - Workflow queueing functionality
+- `TestGetHistory` - History retrieval
+- `TestGetImageData` - Image data fetching
+- `TestUploadImages` - Image upload to ComfyUI
+- `TestGetAvailableModels` - Model availability checks
+- `TestComfyServerStatus` - Server status monitoring
+- `TestAttemptWebsocketReconnect` - Websocket reconnection logic
+- `TestHandlerFunction` - Main handler function edge cases
+
+### Test Coverage
+
+To run tests with coverage:
+
+```bash
+pip install coverage
+python -m coverage run -m unittest discover tests/
+python -m coverage report --omit="tests/*"
+```
+
+Current coverage is approximately 49%. The remaining uncovered code is primarily the main handler's websocket loop which requires integration testing with a running ComfyUI server.
 
 ## Local API Simulation (using Docker Compose)
 
