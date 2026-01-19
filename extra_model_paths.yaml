@@ -8,7 +8,7 @@ comfyui:
     diffusion_models: /runpod-volume/ComfyUI/diffusion_models
     embeddings: /runpod-volume/ComfyUI/embeddings
     loras: /runpod-volume/ComfyUI/loras
-    style_models: /runpod-volume/ComfyU/style_models
+    style_models: /runpod-volume/ComfyUI/style_models
     upscale_models: /runpod-volume/ComfyUI/upscale_models
     vae: /runpod-volume/ComfyUI/vae
     text_encoders: /runpod-volume/ComfyUI/text_encoders
